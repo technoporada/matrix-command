@@ -1,0 +1,59 @@
+<!DOCTYPE html>
+<html lang="pl">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>MatrixCommand</title>
+    <link rel="stylesheet" href="/static/style.css">
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+</head>
+<body>
+    <div id="app">
+        <header>
+            <h1>MatrixCommand</h1>
+            <nav>
+                <button onclick="showTab('dashboard')" class="nav-btn active" data-tab="dashboard">Dashboard</button>
+                <button onclick="showTab('network')" class="nav-btn" data-tab="network">Network</button>
+                <button onclick="showTab('privacy')" class="nav-btn" data-tab="privacy">Privacy</button>
+                <button onclick="showTab('games')" class="nav-btn" data-tab="games">Free Games</button>
+            </nav>
+        </header>
+
+        <main>
+            <div id="tab-dashboard" class="tab active">
+                <div class="stats-grid" id="stats-grid"></div>
+                <div class="system-panel" id="system-panel"></div>
+            </div>
+
+            <div id="tab-network" class="tab">
+                <div class="input-group">
+                    <input type="text" id="network-target" placeholder="IP or domain (e.g. 192.168.1.1)">
+                    <button onclick="runFullRecon()">Full Recon</button>
+                    <button onclick="runPortScan()">Port Scan</button>
+                    <button onclick="runWhois()">WHOIS</button>
+                    <button onclick="runGeoIP()">GeoIP</button>
+                    <button onclick="runDNS()">DNS</button>
+                </div>
+                <div id="network-results" class="results-panel"></div>
+                <div id="map" class="map-container"></div>
+            </div>
+
+            <div id="tab-privacy" class="tab">
+                <div class="input-group">
+                    <input type="text" id="privacy-url" placeholder="URL to scan (e.g. https://example.com)">
+                    <button onclick="runPrivacyScan()">Scan</button>
+                </div>
+                <div id="privacy-results" class="results-panel"></div>
+            </div>
+
+            <div id="tab-games" class="tab">
+                <button onclick="refreshGames()">Refresh</button>
+                <div id="games-list" class="games-grid"></div>
+            </div>
+        </main>
+    </div>
+
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+    <script src="/static/app.js"></script>
+</body>
+</html>

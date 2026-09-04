@@ -1,0 +1,30 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+
+# Environment variables
+.env
+*.env
+
+# Virtual environments
+.venv/
+venv/
+ENV/
+
+# Database
+*.db
+matrixcommand.db
+
+# OS specific
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+
+# Project specific
+setup.log
