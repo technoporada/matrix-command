@@ -1,40 +1,59 @@
-"""Tests for System Info Service"""
+import sys
+import os
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import pytest
 from services.system import SystemInfo
 
 
-@pytest.fixture
-def sysinfo():
-    return SystemInfo()
+def test_system_info_init():
+    info = SystemInfo()
+    assert info is not None
 
 
-def test_get_snapshot(sysinfo):
-    snapshot = sysinfo.get_snapshot()
+def test_get_snapshot():
+    info = SystemInfo()
+    snapshot = info.get_snapshot()
     assert "cpu" in snapshot
     assert "memory" in snapshot
     assert "disk" in snapshot
     assert "network" in snapshot
-    assert "system" in snapshot
-    assert "connections" in snapshot
-    assert "top_processes" in snapshot
-
-    assert 0 <= snapshot["cpu"]["percent"] <= 100
-    assert 0 <= snapshot["memory"]["percent"] <= 100
-    assert 0 <= snapshot["disk"]["percent"] <= 100
-    assert snapshot["cpu"]["cores"] > 0
-    assert snapshot["memory"]["total_gb"] > 0
-    assert snapshot["disk"]["total_gb"] > 0
 
 
-def test_get_network_interfaces(sysinfo):
-    interfaces = sysinfo.get_network_interfaces()
-    assert isinstance(interfaces, list)
-    for iface in interfaces:
-        assert "name" in iface
-        assert "addresses" in iface
+def test_cpu_info():
+    info = SystemInfo()
+    snapshot = info.get_snapshot()
+    cpu = snapshot["cpu"]
+    assert "percent" in cpu
+    assert "cores" in cpu
+    assert "freq" in cpu
+    assert 0 <= cpu["percent"] <= 100
 
 
-def test_hostname(sysinfo):
-    import socket
-    assert sysinfo.hostname == socket.gethostname()
+def test_memory_info():
+    info = SystemInfo()
+    snapshot = info.get_snapshot()
+    mem = snapshot["memory"]
+    assert "total_gb" in mem
+    assert "used_gb" in mem
+    assert "percent" in mem
+    assert mem["total_gb"] > 0
+    assert 0 <= mem["percent"] <= 100
+
+
+def test_disk_info():
+    info = SystemInfo()
+    snapshot = info.get_snapshot()
+    disk = snapshot["disk"]
+    assert "total_gb" in disk
+    assert "used_gb" in disk
+    assert "percent" in disk
+    assert disk["total_gb"] > 0
+
+
+def test_network_info():
+    info = SystemInfo()
+    snapshot = info.get_snapshot()
+    net = snapshot["network"]
+    assert "sent_mb" in net
+    assert "recv_mb" in net

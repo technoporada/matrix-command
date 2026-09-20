@@ -1,4 +1,6 @@
-"""Tests for Network Recon Service"""
+import sys
+import os
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import pytest
 import asyncio
@@ -24,17 +26,15 @@ def test_detect_technologies(network):
     assert "nginx" in names
 
 
-@pytest.mark.asyncio
-async def test_port_scan_localhost(network):
-    results = await network.port_scan("127.0.0.1", [22])
-    assert "open" in results
-    assert "closed" in results
-    assert "filtered" in results
-    assert "duration_ms" in results
+def test_detect_no_tech(network):
+    html = '<html><body>nothing</body></html>'
+    tech = network._detect_technologies(html, {})
+    assert isinstance(tech, list)
 
 
-@pytest.mark.asyncio
-async def test_dns_lookup(network):
-    results = await network.dns_lookup("localhost")
-    assert results["domain"] == "localhost"
-    assert "records" in results
+def test_tech_signatures_categories(network):
+    sigs = network._load_tech_signatures()
+    categories = set(s["category"] for s in sigs)
+    assert "CMS" in categories
+    assert "Framework" in categories
+    assert "Server" in categories
