@@ -1,6 +1,7 @@
 """MatrixCommand - Network Recon Service"""
 
 import asyncio
+import ipaddress
 import socket
 import ssl
 import time
@@ -12,6 +13,34 @@ import httpx
 from bs4 import BeautifulSoup
 
 from config import Config
+
+
+
+def _is_public_host(host: str) -> bool:
+    """SSRF guard: refuse private/loopback/link-local/metadata hosts."""
+    if not host:
+        return False
+    # numeric IP?
+    try:
+        addr = ipaddress.ip_address(host)
+        return addr.is_global
+    except ValueError:
+        pass
+    # resolve and check every address
+    try:
+        infos = socket.getaddrinfo(host, None)
+    except socket.gaierror:
+        return False
+    if not infos:
+        return False
+    for info in infos:
+        try:
+            addr = ipaddress.ip_address(info[4][0])
+        except ValueError:
+            return False
+        if not addr.is_global:
+            return False
+    return True
 
 
 class NetworkRecon:
@@ -187,12 +216,37 @@ class NetworkRecon:
 
     async def web_scraper(self, url: str) -> Dict:
         try:
-            async with httpx.AsyncClient(
-                timeout=self.timeout,
-                follow_redirects=True,
-                headers={"User-Agent": Config.USER_AGENT},
-            ) as client:
-                resp = await client.get(url)
+            # SSRF guard: never fetch private/loopback/metadata hosts, and
+            # never follow a redirect into one. Manual redirect loop so every
+            # hop is re-validated (httpx follow_redirects=True would skip
+            # the check on the second hop).
+            from urllib.parse import urljoin, urlparse
+            cur = url
+            host0 = urlparse(cur).hostname or ""
+            if not _is_public_host(host0):
+                return {"url": url, "error": "blocked: non-public host"}
+            resp = None
+            for _ in range(Config.MAX_REDIRECTS):
+                async with httpx.AsyncClient(
+                    timeout=self.timeout,
+                    follow_redirects=False,
+                    headers={"User-Agent": Config.USER_AGENT},
+                ) as client:
+                    resp = await client.get(cur)
+                if resp.status_code in (301, 302, 303, 307, 308):
+                    loc = resp.headers.get("location")
+                    if not loc:
+                        break
+                    nxt = urljoin(cur, loc)
+                    if not _is_public_host(urlparse(nxt).hostname or ""):
+                        return {"url": url, "error": "blocked: redirect to non-public host"}
+                    cur = nxt
+                    continue
+                break
+            else:
+                return {"url": url, "error": "too many redirects"}
+                if resp is None:
+                    return {"url": url, "error": "fetch failed"}
                 soup = BeautifulSoup(resp.text, "html.parser")
 
                 title = soup.title.string.strip() if soup.title and soup.title.string else ""
