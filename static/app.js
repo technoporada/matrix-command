@@ -157,11 +157,13 @@ async function runPortScan() {
     if (!target) return alert('Enter a target');
     showLoading('network-results');
     const data = await api(`/api/network/port-scan?target=${encodeURIComponent(target)}`);
-    let html = `<div class="section-title">Port Scan: ${target}</div>`;
+    let html = '<div class="section-title"></div>';
     html += `<div>Open: ${(data.open || []).map(p => `<span class="port-open">${p}</span>`).join(', ') || 'None'}</div>`;
     html += `<div>Closed: ${(data.closed || []).map(p => `<span class="port-closed">${p}</span>`).join(', ') || 'None'}</div>`;
     html += `<div>Filtered: ${(data.filtered || []).map(p => `<span class="port-filtered">${p}</span>`).join(', ') || 'None'}</div>`;
-    document.getElementById('network-results').innerHTML = html;
+    const results = document.getElementById('network-results');
+    results.innerHTML = html;
+    results.querySelector('.section-title').textContent = `Port Scan: ${target}`;
 }
 
 async function runWhois() {
