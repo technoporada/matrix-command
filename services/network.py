@@ -7,7 +7,7 @@ import ssl
 import time
 import json
 from typing import Dict, List, Optional
-from urllib.parse import urlparse
+from urllib.parse import urljoin, urlparse, urlsplit, urlunsplit
 
 import httpx
 from bs4 import BeautifulSoup
@@ -16,31 +16,74 @@ from config import Config
 
 
 
-def _is_public_host(host: str) -> bool:
-    """SSRF guard: refuse private/loopback/link-local/metadata hosts."""
+def _resolve_public_addresses(host: str, port: int) -> List[str]:
+    """Resolve a host and return its addresses only if all are globally routable."""
     if not host:
-        return False
-    # numeric IP?
+        return []
     try:
         addr = ipaddress.ip_address(host)
-        return addr.is_global
+        return [str(addr)] if addr.is_global else []
     except ValueError:
         pass
-    # resolve and check every address
     try:
-        infos = socket.getaddrinfo(host, None)
-    except socket.gaierror:
-        return False
+        infos = socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)
+    except (socket.gaierror, UnicodeError):
+        return []
     if not infos:
-        return False
+        return []
+    addresses = []
     for info in infos:
         try:
             addr = ipaddress.ip_address(info[4][0])
         except ValueError:
-            return False
+            return []
         if not addr.is_global:
-            return False
-    return True
+            return []
+        addresses.append(str(addr))
+    return list(dict.fromkeys(addresses))
+
+
+def _prepare_public_request(url: str):
+    try:
+        parsed = urlsplit(url)
+        host = parsed.hostname
+        port = parsed.port
+    except ValueError:
+        return None
+
+    if (
+        parsed.scheme not in ("http", "https")
+        or not parsed.netloc
+        or not host
+        or parsed.username is not None
+        or parsed.password is not None
+    ):
+        return None
+
+    try:
+        host = host.encode("idna").decode("ascii")
+    except UnicodeError:
+        return None
+
+    if port is None:
+        port = 443 if parsed.scheme == "https" else 80
+    elif not 1 <= port <= 65535:
+        return None
+    addresses = _resolve_public_addresses(host, port)
+    if not addresses:
+        return None
+
+    address = ipaddress.ip_address(addresses[0])
+    request_host = f"[{address}]" if address.version == 6 else str(address)
+    host_header = f"[{host}]" if ":" in host else host
+    if parsed.port is not None:
+        request_host = f"{request_host}:{port}"
+        host_header = f"{host_header}:{port}"
+
+    request_url = urlunsplit(
+        (parsed.scheme, request_host, parsed.path or "/", parsed.query, "")
+    )
+    return request_url, host_header, host
 
 
 class NetworkRecon:
@@ -217,76 +260,82 @@ class NetworkRecon:
     async def web_scraper(self, url: str) -> Dict:
         try:
             # SSRF guard: never fetch private/loopback/metadata hosts, and
-            # never follow a redirect into one. Manual redirect loop so every
-            # hop is re-validated (httpx follow_redirects=True would skip
-            # the check on the second hop).
-            from urllib.parse import urljoin, urlparse
+            # pin each request to the address checked before connecting.
             cur = url
-            host0 = urlparse(cur).hostname or ""
-            if not _is_public_host(host0):
-                return {"url": url, "error": "blocked: non-public host"}
             resp = None
             for _ in range(Config.MAX_REDIRECTS):
+                prepared = _prepare_public_request(cur)
+                if not prepared:
+                    error = (
+                        "blocked: redirect to non-public host"
+                        if cur != url
+                        else "blocked: non-public host"
+                    )
+                    return {"url": url, "error": error}
+                request_url, host_header, server_hostname = prepared
                 async with httpx.AsyncClient(
                     timeout=self.timeout,
                     follow_redirects=False,
                     headers={"User-Agent": Config.USER_AGENT},
+                    trust_env=False,
                 ) as client:
-                    resp = await client.get(cur)
+                    request = client.build_request(
+                        "GET", request_url, headers={"Host": host_header}
+                    )
+                    request.extensions["sni_hostname"] = server_hostname
+                    resp = await client.send(request)
                 if resp.status_code in (301, 302, 303, 307, 308):
                     loc = resp.headers.get("location")
                     if not loc:
                         break
                     nxt = urljoin(cur, loc)
-                    if not _is_public_host(urlparse(nxt).hostname or ""):
-                        return {"url": url, "error": "blocked: redirect to non-public host"}
                     cur = nxt
                     continue
                 break
             else:
                 return {"url": url, "error": "too many redirects"}
-                if resp is None:
-                    return {"url": url, "error": "fetch failed"}
-                soup = BeautifulSoup(resp.text, "html.parser")
+            if resp is None:
+                return {"url": url, "error": "fetch failed"}
+            soup = BeautifulSoup(resp.text, "html.parser")
 
-                title = soup.title.string.strip() if soup.title and soup.title.string else ""
-                meta_desc = ""
-                meta_tag = soup.find("meta", attrs={"name": "description"})
-                if meta_tag:
-                    meta_desc = meta_tag.get("content", "")
+            title = soup.title.string.strip() if soup.title and soup.title.string else ""
+            meta_desc = ""
+            meta_tag = soup.find("meta", attrs={"name": "description"})
+            if meta_tag:
+                meta_desc = meta_tag.get("content", "")
 
-                headings = []
-                for tag in ["h1", "h2", "h3"]:
-                    for h in soup.find_all(tag):
-                        text = h.get_text(strip=True)
-                        if text:
-                            headings.append({"tag": tag.upper(), "text": text[:200]})
+            headings = []
+            for tag in ["h1", "h2", "h3"]:
+                for h in soup.find_all(tag):
+                    text = h.get_text(strip=True)
+                    if text:
+                        headings.append({"tag": tag.upper(), "text": text[:200]})
 
-                links = []
-                for a in soup.find_all("a", href=True)[:50]:
-                    text = a.get_text(strip=True)[:100]
-                    href = a["href"]
-                    if text and href:
-                        links.append({"text": text, "href": href})
+            links = []
+            for a in soup.find_all("a", href=True)[:50]:
+                text = a.get_text(strip=True)[:100]
+                href = a["href"]
+                if text and href:
+                    links.append({"text": text, "href": href})
 
-                emails = set()
-                import re
-                for match in re.findall(r"[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}", resp.text):
-                    emails.add(match)
+            emails = set()
+            import re
+            for match in re.findall(r"[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}", resp.text):
+                emails.add(match)
 
-                tech = self._detect_technologies(resp.text, dict(resp.headers))
+            tech = self._detect_technologies(resp.text, dict(resp.headers))
 
-                return {
-                    "url": url,
-                    "status": resp.status_code,
-                    "title": title,
-                    "description": meta_desc,
-                    "headings": headings,
-                    "links": links,
-                    "emails": list(emails)[:20],
-                    "technologies": tech,
-                    "content_length": len(resp.text),
-                }
+            return {
+                "url": url,
+                "status": resp.status_code,
+                "title": title,
+                "description": meta_desc,
+                "headings": headings,
+                "links": links,
+                "emails": list(emails)[:20],
+                "technologies": tech,
+                "content_length": len(resp.text),
+            }
         except Exception as e:
             return {"url": url, "error": str(e)}
 
