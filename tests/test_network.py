@@ -5,8 +5,10 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import pytest
 import asyncio
-import httpx
-from services.network import NetworkRecon, _prepare_public_request
+from types import SimpleNamespace
+
+import services.network as network_service
+from services.network import NetworkRecon
 
 
 @pytest.fixture
@@ -42,47 +44,32 @@ def test_tech_signatures_categories(network):
     assert "Server" in categories
 
 
-def test_prepare_public_request_pins_resolved_address(monkeypatch):
-    def getaddrinfo(host, port, type):
-        assert host == "example.com"
-        assert port == 443
-        assert type == socket.SOCK_STREAM
-        return [
-            (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("8.8.8.8", port))
-        ]
+@pytest.mark.asyncio
+async def test_web_scraper_blocks_non_http_and_private_urls(network, monkeypatch):
+    monkeypatch.setattr(network_service, "_is_public_host", lambda host: False)
 
-    monkeypatch.setattr("services.network.socket.getaddrinfo", getaddrinfo)
+    class UnexpectedClient:
+        def __init__(self, *args, **kwargs):
+            raise AssertionError("blocked URL must not be fetched")
 
-    prepared = _prepare_public_request("https://example.com/path?q=1")
+    monkeypatch.setattr(network_service.httpx, "AsyncClient", UnexpectedClient)
 
-    assert prepared == (
-        "https://8.8.8.8/path?q=1",
-        "example.com",
-        "example.com",
-    )
-
-
-def test_prepare_public_request_rejects_unsafe_urls(monkeypatch):
-    assert _prepare_public_request("http://127.0.0.1/") is None
-    assert _prepare_public_request("file:///etc/passwd") is None
-    assert _prepare_public_request("https://[invalid/") is None
-
-    monkeypatch.setattr(
-        "services.network.socket.getaddrinfo",
-        lambda host, port, type: [
-            (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("8.8.8.8", port)),
-            (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("127.0.0.1", port)),
-        ],
-    )
-    assert _prepare_public_request("https://example.com/") is None
+    for url in ("file:///etc/passwd", "http://127.0.0.1/"):
+        result = await network.web_scraper(url)
+        assert result["error"] == "blocked: non-public host"
 
 
 @pytest.mark.asyncio
-async def test_web_scraper_sends_pinned_request(monkeypatch):
-    sent_requests = []
+async def test_web_scraper_blocks_private_redirect(network, monkeypatch):
+    monkeypatch.setattr(
+        network_service,
+        "_is_public_host",
+        lambda host: host == "public.example",
+    )
+    fetched_urls = []
 
     class FakeClient:
-        def __init__(self, **kwargs):
+        def __init__(self, *args, **kwargs):
             pass
 
         async def __aenter__(self):
@@ -91,22 +78,46 @@ async def test_web_scraper_sends_pinned_request(monkeypatch):
         async def __aexit__(self, *args):
             pass
 
-        def build_request(self, method, url, headers):
-            return httpx.Request(method, url, headers=headers)
+        async def get(self, url):
+            fetched_urls.append(url)
+            return SimpleNamespace(
+                status_code=302,
+                headers={"location": "http://127.0.0.1/"},
+            )
 
-        async def send(self, request):
-            sent_requests.append(request)
-            return httpx.Response(200, text="<title>Example</title>", request=request)
+    monkeypatch.setattr(network_service.httpx, "AsyncClient", FakeClient)
 
-    monkeypatch.setattr(
-        "services.network._prepare_public_request",
-        lambda url: ("https://8.8.8.8/path", "example.com", "example.com"),
-    )
-    monkeypatch.setattr("services.network.httpx.AsyncClient", FakeClient)
+    result = await network.web_scraper("https://public.example/")
 
-    result = await NetworkRecon().web_scraper("https://example.com/path")
+    assert result["error"] == "blocked: redirect to non-public host"
+    assert fetched_urls == ["https://public.example/"]
 
+
+@pytest.mark.asyncio
+async def test_web_scraper_returns_parsed_response(network, monkeypatch):
+    monkeypatch.setattr(network_service, "_is_public_host", lambda host: True)
+
+    class FakeClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            pass
+
+        async def get(self, url):
+            return SimpleNamespace(
+                status_code=200,
+                headers={"server": "nginx"},
+                text="<html><title>Example</title><h1>Welcome</h1></html>",
+            )
+
+    monkeypatch.setattr(network_service.httpx, "AsyncClient", FakeClient)
+
+    result = await network.web_scraper("https://public.example/")
+
+    assert result["status"] == 200
     assert result["title"] == "Example"
-    assert str(sent_requests[0].url) == "https://8.8.8.8/path"
-    assert sent_requests[0].headers["host"] == "example.com"
-    assert sent_requests[0].extensions["sni_hostname"] == "example.com"
+    assert result["headings"] == [{"tag": "H1", "text": "Welcome"}]

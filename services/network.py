@@ -86,6 +86,17 @@ def _prepare_public_request(url: str):
     return request_url, host_header, host
 
 
+def _is_public_url(url: str) -> bool:
+    try:
+        parsed = urlparse(url)
+        return (
+            parsed.scheme.lower() in ("http", "https")
+            and _is_public_host(parsed.hostname or "")
+        )
+    except ValueError:
+        return False
+
+
 class NetworkRecon:
     def __init__(self):
         self.timeout = Config.REQUEST_TIMEOUT
@@ -289,6 +300,8 @@ class NetworkRecon:
                     if not loc:
                         break
                     nxt = urljoin(cur, loc)
+                    if not _is_public_url(nxt):
+                        return {"url": url, "error": "blocked: redirect to non-public host"}
                     cur = nxt
                     continue
                 break
