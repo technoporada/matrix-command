@@ -4,6 +4,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import pytest
 import asyncio
+import ssl
 from services.network import NetworkRecon
 
 
@@ -38,3 +39,31 @@ def test_tech_signatures_categories(network):
     assert "CMS" in categories
     assert "Framework" in categories
     assert "Server" in categories
+
+
+@pytest.mark.asyncio
+async def test_ssl_check_requires_tls_12(network, monkeypatch):
+    class FakeSocket:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            pass
+
+        def getpeercert(self, binary_form):
+            return b"certificate"
+
+    class FakeContext:
+        def wrap_socket(self, sock, server_hostname):
+            return FakeSocket()
+
+    context = FakeContext()
+    monkeypatch.setattr("services.network.ssl.create_default_context", lambda: context)
+    monkeypatch.setattr(
+        "services.network.socket.create_connection", lambda *args, **kwargs: FakeSocket()
+    )
+    monkeypatch.setattr("services.network.ssl.DER_cert_to_PEM_cert", lambda cert: "certificate")
+
+    await network.ssl_check("example.com")
+
+    assert context.minimum_version == ssl.TLSVersion.TLSv1_2
