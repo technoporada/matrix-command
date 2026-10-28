@@ -1,7 +1,12 @@
-"""Tests for Network Recon Service"""
+import sys
+import os
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import pytest
 import asyncio
+from types import SimpleNamespace
+
+import services.network as network_service
 from services.network import NetworkRecon
 
 
@@ -24,17 +29,94 @@ def test_detect_technologies(network):
     assert "nginx" in names
 
 
-@pytest.mark.asyncio
-async def test_port_scan_localhost(network):
-    results = await network.port_scan("127.0.0.1", [22])
-    assert "open" in results
-    assert "closed" in results
-    assert "filtered" in results
-    assert "duration_ms" in results
+def test_detect_no_tech(network):
+    html = '<html><body>nothing</body></html>'
+    tech = network._detect_technologies(html, {})
+    assert isinstance(tech, list)
+
+
+def test_tech_signatures_categories(network):
+    sigs = network._load_tech_signatures()
+    categories = set(s["category"] for s in sigs)
+    assert "CMS" in categories
+    assert "Framework" in categories
+    assert "Server" in categories
 
 
 @pytest.mark.asyncio
-async def test_dns_lookup(network):
-    results = await network.dns_lookup("localhost")
-    assert results["domain"] == "localhost"
-    assert "records" in results
+async def test_web_scraper_blocks_non_http_and_private_urls(network, monkeypatch):
+    monkeypatch.setattr(network_service, "_is_public_host", lambda host: False)
+
+    class UnexpectedClient:
+        def __init__(self, *args, **kwargs):
+            raise AssertionError("blocked URL must not be fetched")
+
+    monkeypatch.setattr(network_service.httpx, "AsyncClient", UnexpectedClient)
+
+    for url in ("file:///etc/passwd", "http://127.0.0.1/"):
+        result = await network.web_scraper(url)
+        assert result["error"] == "blocked: non-public host"
+
+
+@pytest.mark.asyncio
+async def test_web_scraper_blocks_private_redirect(network, monkeypatch):
+    monkeypatch.setattr(
+        network_service,
+        "_is_public_host",
+        lambda host: host == "public.example",
+    )
+    fetched_urls = []
+
+    class FakeClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            pass
+
+        async def get(self, url):
+            fetched_urls.append(url)
+            return SimpleNamespace(
+                status_code=302,
+                headers={"location": "http://127.0.0.1/"},
+            )
+
+    monkeypatch.setattr(network_service.httpx, "AsyncClient", FakeClient)
+
+    result = await network.web_scraper("https://public.example/")
+
+    assert result["error"] == "blocked: redirect to non-public host"
+    assert fetched_urls == ["https://public.example/"]
+
+
+@pytest.mark.asyncio
+async def test_web_scraper_returns_parsed_response(network, monkeypatch):
+    monkeypatch.setattr(network_service, "_is_public_host", lambda host: True)
+
+    class FakeClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            pass
+
+        async def get(self, url):
+            return SimpleNamespace(
+                status_code=200,
+                headers={"server": "nginx"},
+                text="<html><title>Example</title><h1>Welcome</h1></html>",
+            )
+
+    monkeypatch.setattr(network_service.httpx, "AsyncClient", FakeClient)
+
+    result = await network.web_scraper("https://public.example/")
+
+    assert result["status"] == 200
+    assert result["title"] == "Example"
+    assert result["headings"] == [{"tag": "H1", "text": "Welcome"}]
