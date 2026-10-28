@@ -4,7 +4,9 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import pytest
 import asyncio
-import ssl
+from types import SimpleNamespace
+
+import services.network as network_service
 from services.network import NetworkRecon
 
 
@@ -42,28 +44,79 @@ def test_tech_signatures_categories(network):
 
 
 @pytest.mark.asyncio
-async def test_ssl_check_requires_tls_12(network, monkeypatch):
-    class FakeSocket:
-        def __enter__(self):
-            return self
+async def test_web_scraper_blocks_non_http_and_private_urls(network, monkeypatch):
+    monkeypatch.setattr(network_service, "_is_public_host", lambda host: False)
 
-        def __exit__(self, *_):
+    class UnexpectedClient:
+        def __init__(self, *args, **kwargs):
+            raise AssertionError("blocked URL must not be fetched")
+
+    monkeypatch.setattr(network_service.httpx, "AsyncClient", UnexpectedClient)
+
+    for url in ("file:///etc/passwd", "http://127.0.0.1/"):
+        result = await network.web_scraper(url)
+        assert result["error"] == "blocked: non-public host"
+
+
+@pytest.mark.asyncio
+async def test_web_scraper_blocks_private_redirect(network, monkeypatch):
+    monkeypatch.setattr(
+        network_service,
+        "_is_public_host",
+        lambda host: host == "public.example",
+    )
+    fetched_urls = []
+
+    class FakeClient:
+        def __init__(self, *args, **kwargs):
             pass
 
-        def getpeercert(self, binary_form):
-            return b"certificate"
+        async def __aenter__(self):
+            return self
 
-    class FakeContext:
-        def wrap_socket(self, sock, server_hostname):
-            return FakeSocket()
+        async def __aexit__(self, *args):
+            pass
 
-    context = FakeContext()
-    monkeypatch.setattr("services.network.ssl.create_default_context", lambda: context)
-    monkeypatch.setattr(
-        "services.network.socket.create_connection", lambda *args, **kwargs: FakeSocket()
-    )
-    monkeypatch.setattr("services.network.ssl.DER_cert_to_PEM_cert", lambda cert: "certificate")
+        async def get(self, url):
+            fetched_urls.append(url)
+            return SimpleNamespace(
+                status_code=302,
+                headers={"location": "http://127.0.0.1/"},
+            )
 
-    await network.ssl_check("example.com")
+    monkeypatch.setattr(network_service.httpx, "AsyncClient", FakeClient)
 
-    assert context.minimum_version == ssl.TLSVersion.TLSv1_2
+    result = await network.web_scraper("https://public.example/")
+
+    assert result["error"] == "blocked: redirect to non-public host"
+    assert fetched_urls == ["https://public.example/"]
+
+
+@pytest.mark.asyncio
+async def test_web_scraper_returns_parsed_response(network, monkeypatch):
+    monkeypatch.setattr(network_service, "_is_public_host", lambda host: True)
+
+    class FakeClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            pass
+
+        async def get(self, url):
+            return SimpleNamespace(
+                status_code=200,
+                headers={"server": "nginx"},
+                text="<html><title>Example</title><h1>Welcome</h1></html>",
+            )
+
+    monkeypatch.setattr(network_service.httpx, "AsyncClient", FakeClient)
+
+    result = await network.web_scraper("https://public.example/")
+
+    assert result["status"] == 200
+    assert result["title"] == "Example"
+    assert result["headings"] == [{"tag": "H1", "text": "Welcome"}]

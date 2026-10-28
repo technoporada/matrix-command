@@ -7,7 +7,7 @@ import ssl
 import time
 import json
 from typing import Dict, List, Optional
-from urllib.parse import urlparse
+from urllib.parse import urljoin, urlparse
 
 import httpx
 from bs4 import BeautifulSoup
@@ -41,6 +41,17 @@ def _is_public_host(host: str) -> bool:
         if not addr.is_global:
             return False
     return True
+
+
+def _is_public_url(url: str) -> bool:
+    try:
+        parsed = urlparse(url)
+        return (
+            parsed.scheme.lower() in ("http", "https")
+            and _is_public_host(parsed.hostname or "")
+        )
+    except ValueError:
+        return False
 
 
 class NetworkRecon:
@@ -221,10 +232,8 @@ class NetworkRecon:
             # never follow a redirect into one. Manual redirect loop so every
             # hop is re-validated (httpx follow_redirects=True would skip
             # the check on the second hop).
-            from urllib.parse import urljoin, urlparse
             cur = url
-            host0 = urlparse(cur).hostname or ""
-            if not _is_public_host(host0):
+            if not _is_public_url(cur):
                 return {"url": url, "error": "blocked: non-public host"}
             resp = None
             for _ in range(Config.MAX_REDIRECTS):
@@ -239,55 +248,55 @@ class NetworkRecon:
                     if not loc:
                         break
                     nxt = urljoin(cur, loc)
-                    if not _is_public_host(urlparse(nxt).hostname or ""):
+                    if not _is_public_url(nxt):
                         return {"url": url, "error": "blocked: redirect to non-public host"}
                     cur = nxt
                     continue
                 break
             else:
                 return {"url": url, "error": "too many redirects"}
-                if resp is None:
-                    return {"url": url, "error": "fetch failed"}
-                soup = BeautifulSoup(resp.text, "html.parser")
+            if resp is None:
+                return {"url": url, "error": "fetch failed"}
+            soup = BeautifulSoup(resp.text, "html.parser")
 
-                title = soup.title.string.strip() if soup.title and soup.title.string else ""
-                meta_desc = ""
-                meta_tag = soup.find("meta", attrs={"name": "description"})
-                if meta_tag:
-                    meta_desc = meta_tag.get("content", "")
+            title = soup.title.string.strip() if soup.title and soup.title.string else ""
+            meta_desc = ""
+            meta_tag = soup.find("meta", attrs={"name": "description"})
+            if meta_tag:
+                meta_desc = meta_tag.get("content", "")
 
-                headings = []
-                for tag in ["h1", "h2", "h3"]:
-                    for h in soup.find_all(tag):
-                        text = h.get_text(strip=True)
-                        if text:
-                            headings.append({"tag": tag.upper(), "text": text[:200]})
+            headings = []
+            for tag in ["h1", "h2", "h3"]:
+                for h in soup.find_all(tag):
+                    text = h.get_text(strip=True)
+                    if text:
+                        headings.append({"tag": tag.upper(), "text": text[:200]})
 
-                links = []
-                for a in soup.find_all("a", href=True)[:50]:
-                    text = a.get_text(strip=True)[:100]
-                    href = a["href"]
-                    if text and href:
-                        links.append({"text": text, "href": href})
+            links = []
+            for a in soup.find_all("a", href=True)[:50]:
+                text = a.get_text(strip=True)[:100]
+                href = a["href"]
+                if text and href:
+                    links.append({"text": text, "href": href})
 
-                emails = set()
-                import re
-                for match in re.findall(r"[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}", resp.text):
-                    emails.add(match)
+            emails = set()
+            import re
+            for match in re.findall(r"[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}", resp.text):
+                emails.add(match)
 
-                tech = self._detect_technologies(resp.text, dict(resp.headers))
+            tech = self._detect_technologies(resp.text, dict(resp.headers))
 
-                return {
-                    "url": url,
-                    "status": resp.status_code,
-                    "title": title,
-                    "description": meta_desc,
-                    "headings": headings,
-                    "links": links,
-                    "emails": list(emails)[:20],
-                    "technologies": tech,
-                    "content_length": len(resp.text),
-                }
+            return {
+                "url": url,
+                "status": resp.status_code,
+                "title": title,
+                "description": meta_desc,
+                "headings": headings,
+                "links": links,
+                "emails": list(emails)[:20],
+                "technologies": tech,
+                "content_length": len(resp.text),
+            }
         except Exception as e:
             return {"url": url, "error": str(e)}
 
